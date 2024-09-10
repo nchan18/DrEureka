@@ -20,7 +20,7 @@ ROOT_DIR = f"{EUREKA_ROOT_DIR}/.."
 
 class Config:
     env: str = "franka-cabinet"
-    model: str = "gpt-4"
+    model: str = "gpt-4o"
     temperature: float = 1.0
     sample: int = 5
     iteration: int = 10
@@ -31,9 +31,9 @@ class Config:
     # Note: 0.34 is from go1_config.py (base_height_target)
 
     # train_script: scripts/train.py
-    train_script: str = "../source/extensions/omni.isaac.lab_tasks/omni/isaac/lab_tasks/direct/franka_cabinet/franka_cabinet_env.py"
-    reward_template_file: franka/rewards/eureka_reward_template.py
-    reward_output_file: franka/rewards/eureka_reward.py
+    train_script: str = "../sourextract_task_codece/extensions/omni.isaac.lab_tasks/omni/isaac/lab_tasks/direct/franka_cabinet/franka_cabinet_env.py"
+    reward_output_file str = "../source/extensions/omni.isaac.lab_tasks/omni/isaac/lab_tasks/direct/franka_cabinet/franka_cabinet_gpt_env.py"
+
 
     train_iterations: int = 1000
     success_keyword: str = "runninf"
@@ -53,15 +53,15 @@ def main():
     logging.info("Task description: " + task_description)
 
     env_name = cfg.env.env_name.lower()
-    task_rew_file = f'{ROOT_DIR}/{env_name}/{cfg.env.reward_template_file}'
+    # task_rew_file = f'{ROOT_DIR}/{env_name}/{cfg.env.train_file}'
     # task_obs_file = f'{EUREKA_ROOT_DIR}/envs/{env_name}.py'
     # shutil.copy(task_obs_file, f"env_init_obs.py")
-    # task_rew_code_string = file_to_string(task_rew_file)
-    # task_obs_code_string = file_to_string(task_obs_file)
+    task_rew_code_string = extract_reward_code(cfg.env.train_script)
+    task_obs_code_string = extract_observation_code(cfg.env.train_script)
     # output_file = f"{ROOT_DIR}/{env_name}/{cfg.env.reward_output_file}"
 
     # Loading all text prompts
-       prompt_dir = f'{EUREKA_ROOT_DIR}/utils/prompts'
+    prompt_dir = f'{EUREKA_ROOT_DIR}/utils/prompts'
     initial_system = file_to_string(f'{prompt_dir}/initial_system.txt')
     code_output_tip = file_to_string(f'{prompt_dir}/code_output_tip.txt')
     code_feedback = file_to_string(f'{prompt_dir}/code_feedback.txt')

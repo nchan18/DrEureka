@@ -33,6 +33,34 @@ def extract_task_code(filename):
                 reward_string += line    
     return task_string, reward_string
 
+def extract_reward_code(filename):
+    with open(filename, 'r') as f:
+        lines = f.readlines()
+    function_code = ''
+    function_started = False
+    for line in lines:
+        if re.match(r'def .+reward.+\(.*\):', line):
+            function_started = True
+        if function_started:
+            function_code += line
+            if line.strip() == '':
+                function_started = False
+
+    return function_code
+
+def extract_code_without_reward_code(filename):
+    with open(filename, 'r') as f:
+        lines = f.readlines()
+    function_code = ''
+    function_started = False
+    for line in lines:
+        if re.match(r'def .+reward.+\(.*\):', line):
+            function_started = True
+        if not function_started:
+            function_code += line
+    return function_code
+
+
 def extract_observation_code(filename):
     with open(filename, 'r') as f:
         lines = f.readlines()
