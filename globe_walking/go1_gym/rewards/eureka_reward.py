@@ -29,7 +29,6 @@ class EurekaReward():
         balance_exp = torch.exp(-feet_dist_to_ball_top / balance_temperature)
         balance_reward = torch.mean(balance_exp, dim=-1)
         return 2.0 * balance_reward  # Updated scaling
-    
     def _reward_smooth_actions(self):
         env = self.env
         action_diff = env.actions - env.last_actions

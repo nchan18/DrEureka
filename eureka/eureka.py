@@ -1,10 +1,11 @@
-import hydra
 import numpy as np 
 import json
 import logging 
 import matplotlib.pyplot as plt
 import os
-import openai
+from openai import OpenAI
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 import re
 import subprocess
 from pathlib import Path
@@ -17,13 +18,32 @@ from utils.extract_task_code import *
 EUREKA_ROOT_DIR = os.getcwd()
 ROOT_DIR = f"{EUREKA_ROOT_DIR}/.."
 
-@hydra.main(config_path="cfg", config_name="config", version_base="1.1")
-def main(cfg):
+class Config:
+    env: str = "franka-cabinet"
+    model: str = "gpt-4"
+    temperature: float = 1.0
+    sample: int = 5
+    iteration: int = 10
+    use_wandb: bool = False
+    task: str = "Franka Cabinet"
+    env_name: str = "franka-cabinet"
+    description: str = "Open the cabinet door using the Franka robot arm."
+    # Note: 0.34 is from go1_config.py (base_height_target)
+
+    # train_script: scripts/train.py
+    train_script: str = "../source/extensions/omni.isaac.lab_tasks/omni/isaac/lab_tasks/direct/franka_cabinet/franka_cabinet_env.py"
+    reward_template_file: franka/rewards/eureka_reward_template.py
+    reward_output_file: franka/rewards/eureka_reward.py
+
+    train_iterations: int = 1000
+    success_keyword: str = "runninf"
+    failure_keyword: str = "Traceback"
+
+def main():
+    cfg = Config()
     workspace_dir = Path.cwd()
     logging.info(f"Workspace: {workspace_dir}")
     logging.info(f"Project Root: {EUREKA_ROOT_DIR}")
-
-    openai.api_key = os.getenv("OPENAI_API_KEY")
 
     task = cfg.env.task
     task_description = cfg.env.description
@@ -34,25 +54,29 @@ def main(cfg):
 
     env_name = cfg.env.env_name.lower()
     task_rew_file = f'{ROOT_DIR}/{env_name}/{cfg.env.reward_template_file}'
-    task_obs_file = f'{EUREKA_ROOT_DIR}/envs/{env_name}.py'
-    shutil.copy(task_obs_file, f"env_init_obs.py")
-    task_rew_code_string = file_to_string(task_rew_file)
-    task_obs_code_string = file_to_string(task_obs_file)
-    output_file = f"{ROOT_DIR}/{env_name}/{cfg.env.reward_output_file}"
+    # task_obs_file = f'{EUREKA_ROOT_DIR}/envs/{env_name}.py'
+    # shutil.copy(task_obs_file, f"env_init_obs.py")
+    # task_rew_code_string = file_to_string(task_rew_file)
+    # task_obs_code_string = file_to_string(task_obs_file)
+    # output_file = f"{ROOT_DIR}/{env_name}/{cfg.env.reward_output_file}"
 
     # Loading all text prompts
-    prompt_dir = f'{EUREKA_ROOT_DIR}/prompts'
+       prompt_dir = f'{EUREKA_ROOT_DIR}/utils/prompts'
     initial_system = file_to_string(f'{prompt_dir}/initial_system.txt')
     code_output_tip = file_to_string(f'{prompt_dir}/code_output_tip.txt')
     code_feedback = file_to_string(f'{prompt_dir}/code_feedback.txt')
     initial_user = file_to_string(f'{prompt_dir}/initial_user.txt')
-    reward_signature = file_to_string(f'{prompt_dir}/reward_signatures/{env_name}.txt')
+    reward_signature = file_to_string(f'{prompt_dir}/reward_signature.txt')
     policy_feedback = file_to_string(f'{prompt_dir}/policy_feedback.txt')
     execution_error_feedback = file_to_string(f'{prompt_dir}/execution_error_feedback.txt')
 
     initial_system = initial_system.format(task_reward_signature_string=reward_signature) + code_output_tip
     initial_user = initial_user.format(task_obs_code_string=task_obs_code_string, task_description=task_description)
     messages = [{"role": "system", "content": initial_system}, {"role": "user", "content": initial_user}]
+
+    task_code_string = task_code_string.replace(task, task+suffix)
+    # Create Task YAML files
+    create_task(ISAAC_ROOT_DIR, cfg.env.task, cfg.env.env_name, suffix)
 
     DUMMY_FAILURE = -10000.
     max_successes = []
@@ -62,7 +86,7 @@ def main(cfg):
     max_success_overall = DUMMY_FAILURE
     max_success_reward_correlation_overall = DUMMY_FAILURE
     max_reward_code_path = None 
-    
+
     # Eureka generation loop
     for iter in range(cfg.iteration):
         # Get Eureka response
@@ -78,14 +102,12 @@ def main(cfg):
         while True:
             if total_samples >= cfg.sample:
                 break
-            for attempt in range(3):
+            for attempt in range(1000):
                 try:
-                    response_cur = openai.ChatCompletion.create(
-                        model=model,
-                        messages=messages,
-                        temperature=cfg.temperature,
-                        n=chunk_size
-                    )
+                    response_cur = client.chat.completions.create(model=model,
+                    messages=messages,
+                    temperature=cfg.temperature,
+                    n=chunk_size)
                     total_samples += chunk_size
                     break
                 except Exception as e:
@@ -98,10 +120,10 @@ def main(cfg):
                 logging.info("Code terminated due to too many failed attempts!")
                 exit()
 
-            responses.extend(response_cur["choices"])
-            prompt_tokens = response_cur["usage"]["prompt_tokens"]
-            total_completion_token += response_cur["usage"]["completion_tokens"]
-            total_token += response_cur["usage"]["total_tokens"]
+            responses.extend(response_cur.choices)
+            prompt_tokens = response_cur.usage.prompt_tokens
+            total_completion_token += response_cur.usage.completion_tokens
+            total_token += response_cur.usage.total_tokens
 
         if cfg.sample == 1:
             logging.info(f"Iteration {iter}: GPT Output:\n " + responses[0]["message"]["content"] + "\n")
@@ -112,7 +134,7 @@ def main(cfg):
         code_runs = [] 
         rl_runs = []
         for response_id in range(cfg.sample):
-            response_cur = responses[response_id]["message"]["content"]
+            response_cur = responses[response_id].message.content
             logging.info(f"Iteration {iter}: Processing Code Run {response_id}")
 
             # Regex patterns to extract python code enclosed in GPT response
@@ -132,20 +154,42 @@ def main(cfg):
 
             # Remove unnecessary imports
             lines = code_string.split("\n")
-            lines = [" "*4 + line for line in lines]
             for i, line in enumerate(lines):
                 if line.strip().startswith("def "):
                     code_string = "\n".join(lines[i:])
-                    break
-            
-            code_runs.append(code_string)
-                    
+
             # Add the Eureka Reward Signature to the environment code
-            cur_task_rew_code_string = task_rew_code_string.replace("# INSERT EUREKA REWARD HERE", code_string)
+            try:
+                gpt_reward_signature, input_lst = get_function_signature(code_string)
+            except Exception as e:
+                logging.info(f"Iteration {iter}: Code Run {response_id} cannot parse function signature!")
+                continue
+
+            code_runs.append(code_string)
+            reward_signature = [
+                f"self.rew_buf[:], self.rew_dict = {gpt_reward_signature}",
+                f"self.extras['gpt_reward'] = self.rew_buf.mean()",
+                f"for rew_state in self.rew_dict: self.extras[rew_state] = self.rew_dict[rew_state].mean()",
+            ]
+            indent = " " * 8
+            reward_signature = "\n".join([indent + line for line in reward_signature])
+            if "def compute_reward(self)" in task_code_string:
+                task_code_string_iter = task_code_string.replace("def compute_reward(self):", "def compute_reward(self):\n" + reward_signature)
+            elif "def compute_reward(self, actions)" in task_code_string:
+                task_code_string_iter = task_code_string.replace("def compute_reward(self, actions):", "def compute_reward(self, actions):\n" + reward_signature)
+            else:
+                raise NotImplementedError
 
             # Save the new environment code when the output contains valid code string!
             with open(output_file, 'w') as file:
-                file.writelines(cur_task_rew_code_string + '\n')
+                file.writelines(task_code_string_iter + '\n')
+                file.writelines("from typing import Tuple, Dict" + '\n')
+                file.writelines("import math" + '\n')
+                file.writelines("import torch" + '\n')
+                file.writelines("from torch import Tensor" + '\n')
+                if "@torch.jit.script" not in code_string:
+                    code_string = "@torch.jit.script\n" + code_string
+                file.writelines(code_string + '\n')
 
             with open(f"env_iter{iter}_response{response_id}_rewardonly.py", 'w') as file:
                 file.writelines(code_string + '\n')
@@ -155,17 +199,18 @@ def main(cfg):
 
             # Find the freest GPU to run GPU-accelerated RL
             set_freest_gpu()
-            
+
             # Execute the python file with flags
             rl_filepath = f"env_iter{iter}_response{response_id}.txt"
             with open(rl_filepath, 'w') as f:
-                command = f"python -u {ROOT_DIR}/{env_name}/{cfg.env.train_script} --iterations {cfg.env.train_iterations} --dr-config off --reward-config eureka"
-                command = command.split(" ")
-                if not cfg.use_wandb:
-                    command.append("--no-wandb")
-                process = subprocess.Popen(command, stdout=f, stderr=f)
-            block_until_training(rl_filepath, success_keyword=cfg.env.success_keyword, failure_keyword=cfg.env.failure_keyword,
-                                 log_status=True, iter_num=iter, response_id=response_id)
+                process = subprocess.Popen(['python3', '-u', f'{ISAAC_ROOT_DIR}/train.py',  
+                                            'hydra/output=subprocess',
+                                            f'task={task}{suffix}', f'wandb_activate={cfg.use_wandb}',
+                                            f'wandb_entity={cfg.wandb_username}', f'wandb_project={cfg.wandb_project}',
+                                            f'headless={not cfg.capture_video}', f'capture_video={cfg.capture_video}', 'force_render=False',
+                                            f'max_iterations={cfg.max_iterations}'],
+                                            stdout=f, stderr=f)
+            block_until_training(rl_filepath, log_status=True, iter_num=iter, response_id=response_id)
             rl_runs.append(process)
 
         # Gather RL training results and construct reward reflection
@@ -174,7 +219,7 @@ def main(cfg):
         successes = []
         reward_correlations = []
         code_paths = []
-        
+
         exec_success = False 
         for response_id, (code_run, rl_run) in enumerate(zip(code_runs, rl_runs)):
             rl_run.communicate()
@@ -197,42 +242,45 @@ def main(cfg):
             if traceback_msg == '':
                 # If RL execution has no error, provide policy statistics feedback
                 exec_success = True
-                run_log = construct_run_log(stdout_str)
-                
-                train_iterations = np.array(run_log['iterations/']).shape[0]
-                epoch_freq = max(int(train_iterations // 10), 1)
-                
-                epochs_per_log = 10
-                content += policy_feedback.format(epoch_freq=epochs_per_log*epoch_freq)
-                
+                lines = stdout_str.split('\n')
+                for i, line in enumerate(lines):
+                    if line.startswith('Tensorboard Directory:'):
+                        break 
+                tensorboard_logdir = line.split(':')[-1].strip() 
+                tensorboard_logs = load_tensorboard_logs(tensorboard_logdir)
+                max_iterations = np.array(tensorboard_logs['gt_reward']).shape[0]
+                epoch_freq = max(int(max_iterations // 10), 1)
+
+                content += policy_feedback.format(epoch_freq=epoch_freq)
+
                 # Compute Correlation between Human-Engineered and GPT Rewards
-                if "gt_reward" in run_log and "gpt_reward" in run_log:
-                    gt_reward = np.array(run_log["gt_reward"])
-                    gpt_reward = np.array(run_log["gpt_reward"])
+                if "gt_reward" in tensorboard_logs and "gpt_reward" in tensorboard_logs:
+                    gt_reward = np.array(tensorboard_logs["gt_reward"])
+                    gpt_reward = np.array(tensorboard_logs["gpt_reward"])
                     reward_correlation = np.corrcoef(gt_reward, gpt_reward)[0, 1]
                     reward_correlations.append(reward_correlation)
 
                 # Add reward components log to the feedback
-                for metric in sorted(run_log.keys()):
+                for metric in tensorboard_logs:
                     if "/" not in metric:
-                        metric_cur = ['{:.2f}'.format(x) for x in run_log[metric][::epoch_freq]]
-                        metric_cur_max = max(run_log[metric])
-                        metric_cur_mean = sum(run_log[metric]) / len(run_log[metric])
+                        metric_cur = ['{:.2f}'.format(x) for x in tensorboard_logs[metric][::epoch_freq]]
+                        metric_cur_max = max(tensorboard_logs[metric])
+                        metric_cur_mean = sum(tensorboard_logs[metric]) / len(tensorboard_logs[metric])
                         if "consecutive_successes" == metric:
                             successes.append(metric_cur_max)
-                        metric_cur_min = min(run_log[metric])
+                        metric_cur_min = min(tensorboard_logs[metric])
                         if metric != "gt_reward" and metric != "gpt_reward":
                             if metric != "consecutive_successes":
                                 metric_name = metric 
                             else:
-                                metric_name = "task score"
+                                metric_name = "task_score"
                             content += f"{metric_name}: {metric_cur}, Max: {metric_cur_max:.2f}, Mean: {metric_cur_mean:.2f}, Min: {metric_cur_min:.2f} \n"                    
                         else:
                             # Provide ground-truth score when success rate not applicable
-                            if "consecutive_successes" not in run_log:
+                            if "consecutive_successes" not in tensorboard_logs:
                                 content += f"ground-truth score: {metric_cur}, Max: {metric_cur_max:.2f}, Mean: {metric_cur_mean:.2f}, Min: {metric_cur_min:.2f} \n"                    
                 code_feedbacks.append(code_feedback)
-                content += code_feedback
+                content += code_feedback  
             else:
                 # Otherwise, provide execution traceback error feedback
                 successes.append(DUMMY_FAILURE)
@@ -254,7 +302,7 @@ def main(cfg):
         # Select the best code sample based on the success rate
         best_sample_idx = np.argmax(np.array(successes))
         best_content = contents[best_sample_idx]
-            
+
         max_success = successes[best_sample_idx]
         max_success_reward_correlation = reward_correlations[best_sample_idx]
         execute_rate = np.sum(np.array(successes) >= 0.) / cfg.sample
@@ -272,12 +320,12 @@ def main(cfg):
 
         logging.info(f"Iteration {iter}: Max Success: {max_success}, Execute Rate: {execute_rate}, Max Success Reward Correlation: {max_success_reward_correlation}")
         logging.info(f"Iteration {iter}: Best Generation ID: {best_sample_idx}")
-        logging.info(f"Iteration {iter}: GPT Output Content:\n" +  responses[best_sample_idx]["message"]["content"] + "\n")
+        logging.info(f"Iteration {iter}: GPT Output Content:\n" + responses[response_id].message.content + "\n")
         logging.info(f"Iteration {iter}: User Content:\n" + best_content + "\n")
-            
+
         # Plot the success rate
         fig, axs = plt.subplots(2, figsize=(6, 6))
-        fig.suptitle(f'{task}')
+        fig.suptitle(f'{cfg.env.task}')
 
         x_axis = np.arange(len(max_successes))
 
@@ -294,35 +342,70 @@ def main(cfg):
         np.savez('summary.npz', max_successes=max_successes, execute_rates=execute_rates, best_code_paths=best_code_paths, max_successes_reward_correlation=max_successes_reward_correlation)
 
         if len(messages) == 2:
-            messages += [{"role": "assistant", "content": responses[best_sample_idx]["message"]["content"]}]
+            messages += [{"role": "assistant", "content": responses[best_sample_idx].message.content}]
             messages += [{"role": "user", "content": best_content}]
         else:
             assert len(messages) == 4
-            messages[-2] = {"role": "assistant", "content": responses[best_sample_idx]["message"]["content"]}
+            messages[-2] = {"role": "assistant", "content": responses[best_sample_idx].message.content}
             messages[-1] = {"role": "user", "content": best_content}
 
         # Save dictionary as JSON file
         with open('messages.json', 'w') as file:
             json.dump(messages, file, indent=4)
-    
+
+    # Evaluate the best reward code many times
     if max_reward_code_path is None: 
         logging.info("All iterations of code generation failed, aborting...")
         logging.info("Please double check the output env_iter*_response*.txt files for repeating errors!")
         exit()
     logging.info(f"Task: {task}, Max Training Success {max_success_overall}, Correlation {max_success_reward_correlation_overall}, Best Reward Code Path: {max_reward_code_path}")
+    logging.info(f"Evaluating best reward code {cfg.num_eval} times")
+    shutil.copy(max_reward_code_path, output_file)
 
-    best_reward = file_to_string(max_reward_code_path)
-    with open(output_file, 'w') as file:
-        file.writelines(best_reward + '\n')
-    
-    # Get run directory of best-performing policy
-    with open(max_reward_code_path.replace(".py", ".txt"), "r") as file:
-        lines = file.readlines()
-    for line in lines:
-        if line.startswith("Dashboard: "):
-            run_dir = line.split(": ")[1].strip()
-            run_dir = run_dir.replace("http://app.dash.ml/", f"{ROOT_DIR}/{env_name}/runs/")
-            logging.info("Best policy run directory: " + run_dir)
+    eval_runs = []
+    for i in range(cfg.num_eval):
+        set_freest_gpu()
+
+        # Execute the python file with flags
+        rl_filepath = f"reward_code_eval{i}.txt"
+        with open(rl_filepath, 'w') as f:
+            process = subprocess.Popen(['python3', '-u', f'{ISAAC_ROOT_DIR}/train.py',  
+                                        'hydra/output=subprocess',
+                                        f'task={task}{suffix}', f'wandb_activate={cfg.use_wandb}',
+                                        f'wandb_entity={cfg.wandb_username}', f'wandb_project={cfg.wandb_project}',
+                                        f'headless={not cfg.capture_video}', f'capture_video={cfg.capture_video}', 'force_render=False', f'seed={i}',
+                                        ],
+                                        stdout=f, stderr=f)
+
+        block_until_training(rl_filepath)
+        eval_runs.append(process)
+
+    reward_code_final_successes = []
+    reward_code_correlations_final = []
+    for i, rl_run in enumerate(eval_runs):
+        rl_run.communicate()
+        rl_filepath = f"reward_code_eval{i}.txt"
+        with open(rl_filepath, 'r') as f:
+            stdout_str = f.read() 
+        lines = stdout_str.split('\n')
+        for i, line in enumerate(lines):
+            if line.startswith('Tensorboard Directory:'):
+                break 
+        tensorboard_logdir = line.split(':')[-1].strip() 
+        tensorboard_logs = load_tensorboard_logs(tensorboard_logdir)
+        max_success = max(tensorboard_logs['consecutive_successes'])
+        reward_code_final_successes.append(max_success)
+
+        if "gt_reward" in tensorboard_logs and "gpt_reward" in tensorboard_logs:
+            gt_reward = np.array(tensorboard_logs["gt_reward"])
+            gpt_reward = np.array(tensorboard_logs["gpt_reward"])
+            reward_correlation = np.corrcoef(gt_reward, gpt_reward)[0, 1]
+            reward_code_correlations_final.append(reward_correlation)
+
+    logging.info(f"Final Success Mean: {np.mean(reward_code_final_successes)}, Std: {np.std(reward_code_final_successes)}, Raw: {reward_code_final_successes}")
+    logging.info(f"Final Correlation Mean: {np.mean(reward_code_correlations_final)}, Std: {np.std(reward_code_correlations_final)}, Raw: {reward_code_correlations_final}")
+    np.savez('final_eval.npz', reward_code_final_successes=reward_code_final_successes, reward_code_correlations_final=reward_code_correlations_final)
+
 
 if __name__ == "__main__":
     main()
